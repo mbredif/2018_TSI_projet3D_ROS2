@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Ros visualization example</title>
+
+        <style type="text/css">
+            html {
+                height: 100%;
+            }
+
+            body {
+                margin: 0;
+                overflow:hidden;
+                height:100%;
+            }
+
+
+            #viewerDiv {
+                margin : auto auto;
+                width: 100%;
+                height: 100%;
+                padding: 0;
+                display: none;
+            }
+
+        </style>
+
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body>
+        <div id="viewerDiv"></div>
+        <div id="info"></div>
+
+        <div class="centered">
+            <div id="itowns"> </div>
+
+            <script src="dat.gui.min.js"></script>
+            <script src="itowns.js"></script>
+            <script src="debug.js"></script>
+            <script>
+              var THREE = itowns.THREE;
+            </script>
+            <script src="https://cdn.jsdelivr.net/npm/eventemitter2@5.0.1/lib/eventemitter2.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/roslibjs/0.20.0/roslib.min.js"></script>
+            <script src="https://rawgit.com/RoseMathelier/ros3djs/7c14762e9d06a8c012333057a627e6225430b80b/build/ros3d.min.js"></script>
+
+            <script type="text/javascript">
+
+            //http://static.robotwebtools.org/ros3djs/current/ros3d.min.js
+            //https://raw.githubusercontent.com/RoseMathelier/ros3djs/develop/src/Ros3D.js
+
+              console.log("showRosData");
+              //var ros;
+              var pointclouds = [];
+              var oldPostUpdate;
+              var viewerDiv;
+              var debugGui;
+              var view;
+              var controls;
+              var cameraPositioned = false;
+              var listCoords = [];
+              var lineId = 0;
+              var tfClient = undefined;
+
+              viewerDiv = document.getElementById('viewerDiv');
+              viewerDiv.style.display = 'block';
+
+              itowns.THREE.Object3D.DefaultUp.set(0, 0, 1);
+
+              itowns.proj4.defs('EPSG:3946',
+                  '+proj=lcc +lat_1=45.25 +lat_2=46.75 +lat_0=46 +lon_0=3 +x_0=1700000 ' +
+                  '+y_0=5200000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs');
+
+              debugGui = new dat.GUI();
+
+              view = new itowns.View('EPSG:3946', viewerDiv, { renderer: { logarithmicDepthBuffer: true } });
+              view.mainLoop.gfxEngine.renderer.setClearColor(0x555555);
+              controls = new itowns.FlyControls(view, { focusOnClick: true });
+
+              //ROS initialization
+              var ros = new ROSLIB.Ros({
+                        url : 'ws://localhost:9090/'
+                      });
+
+              ros.on('connection', function() {
+                  console.log('Connected to websocket server.');
+              });
+
+              ros.on('error', function(error) {
+                  console.log('Error connecting to websocket server: ', error);
+              });
+
+              ros.on('close', function() {
+                  console.log('Connection to websocket server closed.');
+              });
+
+              //Get the available topics
+              ros.getTopics(handleTopics);
+
+              //GUI interface : topic displayed
+              var gui = new dat.GUI();
+
+              animateNewDataReceived();
+
+              function handleTopics(json){
+
+                //Get all the available types
+                console.log(json);
+                var listTypes = [];
+                json.types.forEach(elmt => {
+                  if(listTypes.indexOf(elmt) == -1){
+                    listTypes.push(elmt);
+                  }
+                });
+
+                //Add folders
+                listTypes.sort();
+                var folders = {};
+                listTypes.forEach(type => {
+                  folders[type] = gui.addFolder(type);
+                });
+
+                //Put each topic in the right folder
+                var params = {};
+                var type;
+                var controllers = {};
+
+                json.topics.forEach((topicName, index) => {
+                  type = json.types[index];
+                  params[topicName] = false;
+
+                  //Topic creation
+                  var topic = new ROSLIB.Topic({
+                      ros : ros,
+                      name : topicName,
+                      messageType : type
+                  });
+
+                  controllers[topicName] = folders[type].add(params, topicName).onFinishChange(checked => {
+
+                    if(checked){
+                      //Subscribe to topic
+                      topic.subscribe(function(message) {
+
+                        switch(topic.messageType){
+                            case 'sensor_msgs/PointCloud2': handlePointCloud2(topicName); break;
+                            case 'tf2_msgs/TFMessage' : handleTF(message); break;
+                            case 'sensor_msgs/NavSatFix' : handleNavSatFix(message); break;
+                            case 'geometry_msgs/PoseWithCovarianceStamped' : handlePWCS(message); break;
+                        }
+                      });
+                    }
+                    else{
+                      //Unsubscribe to topic
+                      topic.unsubscribe();
+                    }
+                  });
+
+                });
+
+              }
+
+              function handleTF(message){
+
+                tfClient = new ROSLIB.TFClient({
+                  ros : ros,
+                  fixedFrame : '/tf_static',
+                  angularThres : 0.01,
+                  transThres : 0.01,
+                  rate : 10.0,
+                });
+
+              }
+
+              function handlePWCS(message){
+
+                //Get data position from the message
+                var position = {
+                  'x' : message.pose.pose.position.x,
+                  'y' : message.pose.pose.position.y,
+                  'z' : message.pose.pose.position.z
+                }
+
+                //Get orientation from the message
+                var orientation = {
+                  'x' : message.pose.pose.orientation.x,
+                  'y' : message.pose.pose.orientation.y,
+                  'z' : message.pose.pose.orientation.z,
+                  'w' : message.pose.pose.orientation.w
+                }
+
+                //Create point geometry
+                var pointCam = new THREE.Geometry();
+                var pointVertice = new THREE.Vector3(position.x, position.y, position.z);
+                pointCam.vertices.push(pointVertice);
+                var point = new THREE.Points(pointCam);
+
+                //Add to scene
+                view.scene.add(point);
+
+                //Camera
+                if(!cameraPositioned){
+                  cameraPositioned = true;
+                  var firstPointPos = new THREE.Vector3(position.x, position.y, position.z);
+                  placeCamera(firstPointPos.clone().add(new itowns.THREE.Vector3(10,10,10)), firstPointPos);
+                }
+
+              }
+
+              function handleNavSatFix(message){
+
+            		// Data registration
+            		var coords = {'latitude':message.latitude, 'longitude':message.longitude, 'altitude':message.altitude};
+            		var state = message.status;
+            		var nameLin = "line" + lineId;
+
+            		// We test the GPS quality
+            		if(state.status !== -1 ){
+            			listCoords.push(coords);
+            		}
+
+
+            		// We test if there are enough points to create a polyline
+            		if(listCoords.length > 1){
+
+            			var points3D = new THREE.Geometry();
+            			points3D.vertices.push(
+            			  new THREE.Vector3(listCoords[0].latitude, listCoords[0].longitude, listCoords[0].altitude),
+            			  new THREE.Vector3(listCoords[1].latitude, listCoords[1].longitude, listCoords[1].altitude)
+            			);
+            			var line = new THREE.Line(points3D, new THREE.LineBasicMaterial({color: "red"}));
+
+            			line.name = nameLin;
+
+            			view.scene.add(line);
+            		}
+
+
+            		/*if(lineId > 10){
+            			nameRem = "line"+ (lineId-10);
+            			removeEntity(nameRem);
+            		}*/
+
+
+            		if(listCoords.length > 1){
+            			listCoords.shift();
+            		}
+
+            		lineId++;
+
+                /*
+            		// Data positionning
+                var geometry = new itowns.THREE.SphereGeometry( 0.5, 8, 8 );
+                var material = new itowns.THREE.MeshBasicMaterial( {wireframe: true, color: 0xffff00, side: itowns.THREE.DoubleSide} );
+                var sphere = new itowns.THREE.Mesh( geometry, material );
+
+                view.scene.add( sphere );
+                */
+
+                view.camera.camera3D.fov = 80;
+
+                //Camera
+                if(!cameraPositioned){
+                  cameraPositioned = true;
+                  var firstPointPos = new THREE.Vector3(listCoords[0].latitude, listCoords[0].longitude, listCoords[0].altitude);
+                  placeCamera(firstPointPos.clone().add(new itowns.THREE.Vector3(10,10,10)), firstPointPos);
+                }
+          	  }
+
+              function placeCamera(position, lookAt) {
+                  view.camera.camera3D.position.set(position.x, position.y, position.z);
+                  view.camera.camera3D.lookAt(lookAt);
+                  // create controls
+                  controls = new itowns.FirstPersonControls(view, { focusOnClick: true });
+                  //debugGui.add(controls, 'moveSpeed', 1, 100).name('Movement speed');
+
+                  view.notifyChange(true);
+              }
+
+
+              function handlePointCloud2(topic){
+
+                if(tfClient != undefined){
+                  var pointCloudClient = new ROS3D.PointCloud2({
+                    ros: ros,
+                    topic: topic,  // cpTopicName
+                    tfClient: tfClient,
+                    rootObject: view.scene,
+                    size: 0.05,
+                    color: 0xff0000,
+                    max_pts: 100000,
+                  });
+
+                  view.camera.camera3D.fov = 80;
+
+                  console.log(pointCloudClient);
+
+
+                  //Camera
+                  if(!cameraPositioned){
+                    cameraPositioned = true
+                    var array = pointCloudClient.particles.points.array;
+                    var firstPointPos = new THREE.Vector3(array[0], array[1], array[2]);
+                    placeCamera(firstPointPos.clone().add(new itowns.THREE.Vector3(10,10,10)), firstPointPos);
+                  }
+
+                }
+                else{
+                  console.log("No TF client");
+                }
+
+              }
+
+              function animateNewDataReceived() {
+
+                  requestAnimationFrame( animateNewDataReceived);
+
+                  for(var i = 0; i < pointclouds.length; ++i){
+                      var p = pointclouds[i];
+                      if(p.scale.x < 1){
+                          p.scale.x *= 1.01;//multiplyScalar(1.1);
+                          p.updateMatrixWorld(true);
+                      }
+                      if(p.material.opacity < 0.5) p.material.opacity += 0.005;
+
+                  }
+                  view.notifyChange(true);
+              }
+
+
+              // Specify the address of the rosbridge socket, the topic name and message type
+              //showRosData(topic);
+
+            </script>
+    </body>
+</html>
