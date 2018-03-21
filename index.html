@@ -54,13 +54,11 @@
               var pointclouds = [];
               var oldPostUpdate;
               var viewerDiv;
-              var debugGui;
               var view;
               var controls;
               var cameraPositioned = false;
               var listCoords = [];
               var lineId = 0;
-              var tfClient = undefined;
 
               viewerDiv = document.getElementById('viewerDiv');
               viewerDiv.style.display = 'block';
@@ -71,8 +69,6 @@
                   '+proj=lcc +lat_1=45.25 +lat_2=46.75 +lat_0=46 +lon_0=3 +x_0=1700000 ' +
                   '+y_0=5200000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs');
 
-              debugGui = new dat.GUI();
-
               view = new itowns.View('EPSG:3946', viewerDiv, { renderer: { logarithmicDepthBuffer: true } });
               view.mainLoop.gfxEngine.renderer.setClearColor(0x555555);
               controls = new itowns.FlyControls(view, { focusOnClick: true });
@@ -81,6 +77,14 @@
               var ros = new ROSLIB.Ros({
                         url : 'wss://localhost:9090/'
                       });
+
+              var tfClient = new ROSLIB.TFClient({
+                    ros : ros,
+                    fixedFrame : '/l93',
+                    angularThres : 0.01,
+                    transThres : 0.01,
+                    rate : 10.0,
+                  });
 
               ros.on('connection', function() {
                   console.log('Connected to websocket server.');
@@ -93,85 +97,84 @@
               ros.on('close', function() {
                   console.log('Connection to websocket server closed.');
               });
+              console.log(ros);
+              
+              //GUI interface : topic displayed
+              var gui = new dat.GUI();
 
               //Get the available topics
               ros.getTopics(handleTopics);
 
-              //GUI interface : topic displayed
-              var gui = new dat.GUI();
-
-              animateNewDataReceived();
-
               function handleTopics(json){
-
-                //Get all the available types
                 console.log(json);
-                var listTypes = [];
-                json.types.forEach(elmt => {
-                  if(listTypes.indexOf(elmt) == -1){
-                    listTypes.push(elmt);
-                  }
-                });
-
-                //Add folders
-                listTypes.sort();
-                var folders = {};
-                listTypes.forEach(type => {
-                  folders[type] = gui.addFolder(type);
-                });
-
-                //Put each topic in the right folder
                 var params = {};
                 var type;
                 var controllers = {};
 
+                var folders = {};
                 json.topics.forEach((topicName, index) => {
                   type = json.types[index];
                   params[topicName] = false;
 
+                  
                   //Topic creation
-                  var topic = new ROSLIB.Topic({
-                      ros : ros,
-                      name : topicName,
-                      messageType : type
-                  });
-
-                  controllers[topicName] = folders[type].add(params, topicName).onFinishChange(checked => {
-
-                    if(checked){
-                      //Subscribe to topic
-                      topic.subscribe(function(message) {
-
-                        switch(topic.messageType){
-                            case 'sensor_msgs/PointCloud2': handlePointCloud2(topicName); break;
-                            case 'tf2_msgs/TFMessage' : handleTF(message); break;
-                            case 'sensor_msgs/NavSatFix' : handleNavSatFix(message); break;
-                            case 'geometry_msgs/PoseWithCovarianceStamped' : handlePWCS(message); break;
-                        }
-                      });
+                  var client;
+                  var options = {
+                    ros: ros,
+                    topic: topicName,
+                    tfClient: tfClient,
+                    rootObject: view.scene,
+                    color: 0xcc00ff,
+                    handler : {
+                        'sensor_msgs/NavSatFix' : handleNavSatFix,
+                        //'geometry_msgs/PoseWithCovarianceStamped' : handlePWCS,
                     }
-                    else{
-                      //Unsubscribe to topic
-                      topic.unsubscribe();
+                  };
+                  switch(type){
+                    case 'tf2_msgs/TFMessage' : return; // TFClient is handling it already
+                    case 'sensor_msgs/PointCloud2': 
+                      options.size = 0.05;
+                      options.max_pts = 100000;
+                      client = new ROS3D.PointCloud2(options);
+                      break;
+                    case 'nav_msgs/Path': client = new ROS3D.Path(options); break;
+                    case 'visualization_msgs/InteractiveMarkerUpdate' : client = new ROS3D.InteractiveMarkerClient(options); break;
+                    case 'visualization_msgs/MarkerArray' : client = new ROS3D.MarkerArrayClient(options); break;
+                    case 'visualization_msgs/Marker' : client = new ROS3D.MarkerClient(options); break;
+                    case 'nav_msgs/OccupancyGrid' : client = new ROS3D.OccupancyGridClient(options); break;
+                    case 'nav_msgs/Odometry' : client = new ROS3D.Odometry(options); break;
+                    case 'geometry_msgs/PointStamped' : client = new ROS3D.Point(options); break;
+                    case 'geometry_msgs/PolygonStamped' : client = new ROS3D.Polygon(options); break;
+                    case 'geometry_msgs/PoseStamped' : client = new ROS3D.Pose(options); break;
+                    case 'geometry_msgs/PoseArray' : client = new ROS3D.PoseArray(options); break;
+                    case 'geometry_msgs/PoseWithCovarianceStamped' : client = new ROS3D.PoseWithCovariance(options); break;
+                    case 'sensor_msgs/LaserScan' : client = new ROS3D.LaserScan(options); break;
+                    case '???' : client = new ROS3D.UrdfClient(options); break;
+                    default :
+                        var handler = options.handler[type] || console.log;
+                        client = {
+                            topic : new ROSLIB.Topic({
+                                ros : ros,
+                                name : topicName,
+                                messageType : type
+                            }),
+                            subscribe : function() { this.topic.subscribe(handler); },
+                            unsubscribe : function() { this.topic.unsubscribe(); },
+                        };
                     }
+                    client.unsubscribe();
+                  
+                  // Create the controller and type hierarchy
+                  var folder = gui;
+                  type.split("/").forEach(name => {folder = folder.__folders[name] || folder.addFolder(name); });
+                  controllers[topicName] = folder.add(params, topicName).onFinishChange(checked => {
+                    if(checked) { client.subscribe() } else { client.unsubscribe(); }
                   });
 
                 });
 
               }
-
-              function handleTF(message){
-
-                tfClient = new ROSLIB.TFClient({
-                  ros : ros,
-                  fixedFrame : '/tf_static',
-                  angularThres : 0.01,
-                  transThres : 0.01,
-                  rate : 10.0,
-                });
-
-              }
-
+/*
               function handlePWCS(message){
 
                 //Get data position from the message
@@ -206,9 +209,9 @@
                 }
 
               }
-
+*/
               function handleNavSatFix(message){
-
+                    console.log('handleNavSatFix');
             		// Data registration
             		var coords = {'latitude':message.latitude, 'longitude':message.longitude, 'altitude':message.altitude};
             		var state = message.status;
@@ -277,59 +280,6 @@
                   view.notifyChange(true);
               }
 
-
-              function handlePointCloud2(topic){
-
-                if(tfClient != undefined){
-                  var pointCloudClient = new ROS3D.PointCloud2({
-                    ros: ros,
-                    topic: topic,  // cpTopicName
-                    tfClient: tfClient,
-                    rootObject: view.scene,
-                    size: 0.05,
-                    color: 0xff0000,
-                    max_pts: 100000,
-                  });
-
-                  view.camera.camera3D.fov = 80;
-
-                  console.log(pointCloudClient);
-
-
-                  //Camera
-                  if(!cameraPositioned){
-                    cameraPositioned = true
-                    var array = pointCloudClient.particles.points.array;
-                    var firstPointPos = new THREE.Vector3(array[0], array[1], array[2]);
-                    placeCamera(firstPointPos.clone().add(new itowns.THREE.Vector3(10,10,10)), firstPointPos);
-                  }
-
-                }
-                else{
-                  console.log("No TF client");
-                }
-
-              }
-
-              function animateNewDataReceived() {
-
-                  requestAnimationFrame( animateNewDataReceived);
-
-                  for(var i = 0; i < pointclouds.length; ++i){
-                      var p = pointclouds[i];
-                      if(p.scale.x < 1){
-                          p.scale.x *= 1.01;//multiplyScalar(1.1);
-                          p.updateMatrixWorld(true);
-                      }
-                      if(p.material.opacity < 0.5) p.material.opacity += 0.005;
-
-                  }
-                  view.notifyChange(true);
-              }
-
-
-              // Specify the address of the rosbridge socket, the topic name and message type
-              //showRosData(topic);
 
             </script>
     </body>
